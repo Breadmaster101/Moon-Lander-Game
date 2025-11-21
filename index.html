@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apollo: Lunar Descent Simulator</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #0f0;
+            font-family: 'Share Tech Mono', monospace;
+            user-select: none;
+        }
+
+        #gameContainer {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background: #050505;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Retro CRT Effect Overlay */
+        .scanlines {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(
+                to bottom,
+                rgba(255,255,255,0),
+                rgba(255,255,255,0) 50%,
+                rgba(0,0,0,0.2) 50%,
+                rgba(0,0,0,0.2)
+            );
+            background-size: 100% 4px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .glow {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            box-shadow: inset 0 0 50px rgba(0,0,0,0.9);
+            pointer-events: none;
+            z-index: 11;
+        }
+
+        /* HUD Interface */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            z-index: 5;
+            text-shadow: 0 0 5px #0f0;
+        }
+
+        .telemetry-row {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 5px;
+            font-size: 18px;
+        }
+
+        .label { color: #aaa; }
+        .value { color: #fff; font-weight: bold; }
+        .warn { color: #f33; }
+        .good { color: #0f0; }
+
+        #messages {
+            position: absolute;
+            top: 40%;
+            width: 100%;
+            text-align: center;
+            z-index: 20;
+            pointer-events: none;
+        }
+
+        h1 {
+            font-size: 4rem;
+            margin: 0;
+            text-shadow: 0 0 10px currentColor;
+        }
+        
+        h2 {
+            font-size: 1.5rem;
+            color: #aaa;
+            margin-top: 10px;
+        }
+
+        .hidden { display: none; }
+        
+        /* Message Colors */
+        .msg-win { color: #0f0; }
+        .msg-loss { color: #f33; }
+        .msg-intro { color: #fff; }
+
+        /* Fuel Gauge container */
+        .fuel-box {
+            margin-top: 10px;
+            border: 1px solid #444;
+            width: 200px;
+            height: 15px;
+            position: relative;
+        }
+        #fuel-bar {
+            height: 100%;
+            background-color: #0f0;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="gameCanvas"></canvas>
+    <div class="scanlines"></div>
+    <div class="glow"></div>
+
+    <!-- Heads Up Display -->
+    <div id="ui-layer">
+        <div class="telemetry-row">
+            <span class="label">ALTITUDE:</span>
+            <span id="ui-alt" class="value">0000</span>
+        </div>
+        <div class="telemetry-row">
+            <span class="label">H. SPEED:</span>
+            <span id="ui-hspeed" class="value">0000</span>
+        </div>
+        <div class="telemetry-row">
+            <span class="label">V. SPEED:</span>
+            <span id="ui-vspeed" class="value">0000</span>
+        </div>
+        <div class="telemetry-row">
+            <span class="label">PROPELLANT:</span>
+        </div>
+        <div class="fuel-box">
+            <div id="fuel-bar"></div>
+        </div>
+    </div>
+
+    <!-- Game State Messages -->
+    <div id="messages">
+        <div id="startScreen">
+            <h1 class="msg-intro">APOLLO LANDER</h1>
+            <h2>ARROW KEYS to Thrust/Rotate</h2>
+            <h2>Spacebar to Start</h2>
+        </div>
+        <div id="winScreen" class="hidden">
+            <h1 class="msg-win">THE EAGLE HAS LANDED</h1>
+            <h2>Mission Success</h2>
+            <h2>Spacebar to Restart</h2>
+        </div>
+        <div id="crashScreen" class="hidden">
+            <h1 class="msg-loss">SIGNAL LOST</h1>
+            <h2>Critical Failure</h2>
+            <h2>Spacebar to Retry</h2>
+        </div>
+    </div>
+</div>
+
+<script>
+/**
+ * APOLLO LANDING SIMULATOR
+ * Fixed: Audio/Thrust cancellation on landing
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- CONFIGURATION ---
+const GRAVITY = 0.0018; 
+const THRUST_POWER = 0.0045;
+const ROTATION_SPEED = 0.03;
+const LANDING_PAD_WIDTH = 120;
+const MAX_LANDING_SPEED_V = 0.6;
+const MAX_LANDING_SPEED_H = 0.4;
+const MAX_LANDING_ANGLE = 0.15;
+const FUEL_CONSUMPTION = 0.2;
+
+// --- GAME STATE ---
+let gameState = "START"; 
+let width, height;
+let terrainPoints = [];
+let padX = 0;
+let stars = [];
+let particles = [];
+let groundYUnderLander = 0;
+
+// --- AUDIO SYSTEM ---
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+let audioCtx;
+let thrusterGainNode;
+let audioInitialized = false;
+
+function initAudio() {
+    if (audioInitialized) return;
+    
+    try {
+        audioCtx = new AudioContext();
+        
+        // Create White Noise Buffer
+        const bufferSize = audioCtx.sampleRate * 2; 
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            data[i] = Math.random() * 2 - 1;
+        }
+
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+        noise.loop = true;
+
+        // Lowpass filter for rumble
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 800;
+
+        thrusterGainNode = audioCtx.createGain();
+        thrusterGainNode.gain.value = 0;
+
+        noise.connect(filter);
+        filter.connect(thrusterGainNode);
+        thrusterGainNode.connect(audioCtx.destination);
+        
+        noise.start();
+        audioInitialized = true;
+    } catch(e) {
+        console.warn("Audio init failed", e);
+    }
+}
+
+function updateAudio(isThrusting) {
+    if (!audioInitialized || !thrusterGainNode) return;
+    // Quick fade out if stopping, smooth fade in if starting
+    const targetVolume = isThrusting ? 0.3 : 0;
+    const rampTime = isThrusting ? 0.1 : 0.05; 
+    const currentTime = audioCtx.currentTime;
+    thrusterGainNode.gain.setTargetAtTime(targetVolume, currentTime, rampTime);
+}
+
+
+// --- LANDER OBJECT ---
+const lander = {
+    x: 0, y: 0, vx: 0, vy: 0,
+    angle: -Math.PI / 2,
+    fuel: 100,
+    radius: 12,
+    thrusting: false,
+    rotatingLeft: false,
+    rotatingRight: false,
+
+    reset: function() {
+        this.x = width / 2;
+        this.y = height * 0.15;
+        this.vx = (Math.random() - 0.5) * 1.5;
+        this.vy = 0;
+        this.angle = -Math.PI / 2;
+        this.fuel = 100;
+        this.thrusting = false;
+        this.rotatingLeft = false;
+        this.rotatingRight = false;
+        updateAudio(false); // Ensure silent on reset
+    },
+
+    update: function() {
+        if (this.fuel <= 0) this.thrusting = false;
+
+        // Audio Handling
+        updateAudio(this.thrusting);
+
+        // Rotation
+        if (this.rotatingLeft) this.angle -= ROTATION_SPEED;
+        if (this.rotatingRight) this.angle += ROTATION_SPEED;
+
+        // Thrust physics
+        if (this.thrusting && this.fuel > 0) {
+            this.vx += Math.cos(this.angle) * THRUST_POWER;
+            this.vy += Math.sin(this.angle) * THRUST_POWER;
+            this.fuel -= FUEL_CONSUMPTION;
+            
+            // PARTICLE SYSTEM: Engine Exhaust
+            createThrustParticles(
+                this.x - Math.cos(this.angle) * 10, 
+                this.y - Math.sin(this.angle) * 10, 
+                this.angle + Math.PI
+            );
+
+            // Check for surface dust
+            createSurfaceDust();
+        }
+
+        // Gravity
+        this.vy += GRAVITY;
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // Screen wrapping
+        if (this.x < 0) this.x = width;
+        if (this.x > width) this.x = 0;
+    },
+
+    draw: function() {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle + Math.PI / 2); 
+
+        const scale = 1.2;
+
+        // Draw Legs
+        ctx.strokeStyle = "#d4af37"; 
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        // Left Leg
+        ctx.moveTo(-8 * scale, 6 * scale);
+        ctx.lineTo(-14 * scale, 14 * scale);
+        ctx.lineTo(-16 * scale, 14 * scale); 
+        ctx.moveTo(-14 * scale, 14 * scale);
+        ctx.lineTo(-12 * scale, 14 * scale);
+        // Right Leg
+        ctx.moveTo(8 * scale, 6 * scale);
+        ctx.lineTo(14 * scale, 14 * scale);
+        ctx.lineTo(16 * scale, 14 * scale); 
+        ctx.moveTo(14 * scale, 14 * scale);
+        ctx.lineTo(12 * scale, 14 * scale);
+        ctx.stroke();
+
+        // Draw Descent Stage
+        ctx.fillStyle = "#C68908"; 
+        ctx.fillRect(-8 * scale, -2 * scale, 16 * scale, 10 * scale);
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(-8 * scale, -2 * scale, 16 * scale, 10 * scale);
+
+        // Draw Ascent Stage
+        ctx.fillStyle = "#ccc";
+        ctx.beginPath();
+        ctx.moveTo(-6 * scale, -2 * scale);
+        ctx.lineTo(-8 * scale, -6 * scale);
+        ctx.lineTo(-5 * scale, -10 * scale);
+        ctx.lineTo(5 * scale, -10 * scale);
+        ctx.lineTo(8 * scale, -6 * scale);
+        ctx.lineTo(6 * scale, -2 * scale);
+        ctx.fill();
+        
+        // Windows
+        ctx.fillStyle = "#112";
+        ctx.beginPath();
+        ctx.moveTo(-4 * scale, -7 * scale);
+        ctx.lineTo(-1 * scale, -6 * scale);
+        ctx.lineTo(-1 * scale, -4 * scale);
+        ctx.lineTo(-5 * scale, -5 * scale);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(4 * scale, -7 * scale);
+        ctx.lineTo(1 * scale, -6 * scale);
+        ctx.lineTo(1 * scale, -4 * scale);
+        ctx.lineTo(5 * scale, -5 * scale);
+        ctx.fill();
+
+        // RCS Thrusters visual
+        ctx.fillStyle = "#fff";
+        if (this.rotatingRight) ctx.fillRect(-9 * scale, -7 * scale, 2, 2);
+        if (this.rotatingLeft) ctx.fillRect(7 * scale, -7 * scale, 2, 2);
+
+        ctx.restore();
+    }
+};
+
+// --- PARTICLE SYSTEM ---
+class Particle {
+    constructor(x, y, vx, vy, life, color, size) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.life = life;
+        this.maxLife = life;
+        this.color = color;
+        this.size = size || 2;
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life--;
+    }
+    draw() {
+        ctx.globalAlpha = Math.max(0, this.life / this.maxLife);
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+function createThrustParticles(x, y, angle) {
+    // Main engine flame
+    for(let i=0; i<2; i++) {
+        let spread = (Math.random() - 0.5) * 0.3;
+        // We add lander velocity to particle velocity for better physics look
+        let speed = 2 + Math.random();
+        let vx = Math.cos(angle + spread) * speed + lander.vx;
+        let vy = Math.sin(angle + spread) * speed + lander.vy;
+
+        particles.push(new Particle(x, y, vx, vy, 20 + Math.random()*10, '#fff'));
+        particles.push(new Particle(x, y, vx, vy, 15, '#fa0'));
+    }
+}
+
+function createExplosion(x, y) {
+    for(let i=0; i<60; i++) {
+        let angle = Math.random() * Math.PI * 2;
+        let speed = Math.random() * 3;
+        particles.push(new Particle(x, y, Math.cos(angle)*speed, Math.sin(angle)*speed, 60 + Math.random() * 40, '#fff', 2));
+        particles.push(new Particle(x, y, Math.cos(angle)*speed*0.5, Math.sin(angle)*speed*0.5, 80, '#f50', 3));
+    }
+}
+
+// ** FEATURE: SURFACE DUST **
+function createSurfaceDust() {
+    // Only create dust if close to ground
+    let distToGround = groundYUnderLander - lander.y;
+    
+    // Dust trigger threshold (150px altitude)
+    if (distToGround > 0 && distToGround < 150) {
+        let intensity = Math.max(0, (150 - distToGround) / 10);
+        
+        for(let i=0; i<intensity; i++) {
+            // Calculate direction away from lander center
+            let dir = Math.random() > 0.5 ? 1 : -1;
+            let speed = 1 + Math.random() * 3;
+            
+            particles.push(new Particle(
+                lander.x + (Math.random() * 40 - 20), // Spread X
+                groundYUnderLander, // Spawn on ground
+                dir * speed + lander.vx, // Horizontal velocity + lander momentum
+                (Math.random() * -0.5), // Slight upward puff
+                30 + Math.random() * 20, // Life
+                '#888', // Color
+                1 + Math.random() * 2 // Size
+            ));
+        }
+    }
+}
+
+// --- TERRAIN GENERATION ---
+function generateTerrain() {
+    terrainPoints = [];
+    let segments = 100; 
+    let segmentWidth = width / segments;
+    
+    let padSegmentStart = Math.floor(segments * 0.3 + Math.random() * (segments * 0.4));
+    let padSegmentCount = Math.ceil(LANDING_PAD_WIDTH / segmentWidth);
+    padX = padSegmentStart * segmentWidth + (padSegmentCount * segmentWidth) / 2;
+
+    let y = height * 0.8;
+    let rough = 0;
+
+    for (let i = 0; i <= segments; i++) {
+        let x = i * segmentWidth;
+        
+        if (i >= padSegmentStart && i <= padSegmentStart + padSegmentCount) {
+            // Flat pad
+        } else {
+            rough = (Math.random() - 0.5) * 30;
+            y += rough;
+            if (y > height - 20) y = height - 20;
+            if (y < height * 0.6) y = height * 0.6;
+        }
+        terrainPoints.push({x: x, y: y});
+    }
+}
+
+function drawTerrain() {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.moveTo(0, height);
+    for (let p of terrainPoints) {
+        ctx.lineTo(p.x, p.y);
+    }
+    ctx.lineTo(width, height);
+    ctx.closePath();
+    ctx.fill();
+
+    // Pad indicator
+    let startX = padX - LANDING_PAD_WIDTH/2;
+    let padY = terrainPoints.find(p => p.x >= startX).y;
+    
+    ctx.strokeStyle = '#0f0';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(startX, padY);
+    ctx.lineTo(padX + LANDING_PAD_WIDTH/2, padY);
+    ctx.stroke();
+    
+    ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
+    ctx.fillRect(startX, padY, LANDING_PAD_WIDTH, -padY);
+}
+
+// --- STARFIELD ---
+function initStars() {
+    stars = [];
+    for(let i=0; i<150; i++) {
+        stars.push({
+            x: Math.random() * width,
+            y: Math.random() * height,
+            size: Math.random() * 1.5
+        });
+    }
+}
+function drawStars() {
+    ctx.fillStyle = '#fff';
+    for(let s of stars) {
+        ctx.fillRect(s.x, s.y, s.size, s.size);
+    }
+}
+
+// --- COLLISION & UTILS ---
+function checkCollision() {
+    // Find ground Y under lander for collision AND dust effects
+    groundYUnderLander = height;
+    let p1, p2;
+
+    for (let i = 0; i < terrainPoints.length - 1; i++) {
+        if (lander.x >= terrainPoints[i].x && lander.x <= terrainPoints[i+1].x) {
+            p1 = terrainPoints[i];
+            p2 = terrainPoints[i+1];
+            // Interpolate Y
+            let slope = (p2.y - p1.y) / (p2.x - p1.x);
+            groundYUnderLander = p1.y + slope * (lander.x - p1.x);
+            break;
+        }
+    }
+
+    // Check collision
+    if (lander.y + 16 >= groundYUnderLander) {
+        handleLanding(p1, p2);
+    }
+}
+
+function handleLanding(p1, p2) {
+    // ** CRITICAL FIX **
+    // Stop physics and audio immediately so they don't linger in the LANDED state
+    lander.thrusting = false;
+    lander.rotatingLeft = false;
+    lander.rotatingRight = false;
+    updateAudio(false); 
+
+    let slope = Math.abs((p2.y - p1.y) / (p2.x - p1.x));
+    let isFlat = slope < 0.01;
+    let safeVSpeed = Math.abs(lander.vy) < MAX_LANDING_SPEED_V;
+    let safeHSpeed = Math.abs(lander.vx) < MAX_LANDING_SPEED_H;
+    
+    let angleDiff = Math.abs(lander.angle + Math.PI/2); 
+    while(angleDiff > Math.PI) angleDiff -= Math.PI*2;
+    angleDiff = Math.abs(angleDiff);
+    let safeAngle = angleDiff < MAX_LANDING_ANGLE;
+
+    if (isFlat && safeVSpeed && safeHSpeed && safeAngle) {
+        gameState = "LANDED";
+        lander.y = groundYUnderLander - 16;
+        lander.vy = 0;
+        lander.vx = 0;
+        document.getElementById('winScreen').classList.remove('hidden');
+    } else {
+        gameState = "CRASHED";
+        createExplosion(lander.x, lander.y);
+        document.getElementById('crashScreen').classList.remove('hidden');
+    }
+}
+
+// --- GAME LOOP ---
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+    if(gameState === "START") {
+        initStars();
+        generateTerrain();
+    }
+}
+window.addEventListener('resize', resize);
+
+function loop() {
+    ctx.fillStyle = '#050505';
+    ctx.fillRect(0, 0, width, height);
+
+    drawStars();
+    drawTerrain();
+
+    // Update Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+        particles[i].update();
+        particles[i].draw();
+        if (particles[i].life <= 0) particles.splice(i, 1);
+    }
+
+    if (gameState === "PLAYING") {
+        checkCollision(); // Updates groundYUnderLander
+        lander.update();
+        lander.draw();
+        updateUI();
+    } else if (gameState === "LANDED") {
+        lander.draw();
+    }
+
+    requestAnimationFrame(loop);
+}
+
+// --- UI UPDATES ---
+const uiAlt = document.getElementById('ui-alt');
+const uiHSpeed = document.getElementById('ui-hspeed');
+const uiVSpeed = document.getElementById('ui-vspeed');
+const uiFuelBar = document.getElementById('fuel-bar');
+
+function updateUI() {
+    let alt = Math.max(0, Math.floor((groundYUnderLander - (lander.y + 16)) * 10));
+    let vSpeed = (lander.vy * 100).toFixed(0);
+    let hSpeed = (lander.vx * 100).toFixed(0);
+
+    uiAlt.innerText = alt.toString().padStart(4, '0');
+    uiHSpeed.innerText = Math.abs(hSpeed).toString().padStart(3, '0');
+    uiHSpeed.className = "value " + (Math.abs(lander.vx) > MAX_LANDING_SPEED_H ? "warn" : "good");
+    uiVSpeed.innerText = (-vSpeed).toString().padStart(3, '0');
+    uiVSpeed.className = "value " + (Math.abs(lander.vy) > MAX_LANDING_SPEED_V ? "warn" : "good");
+
+    uiFuelBar.style.width = Math.max(0, lander.fuel) + "%";
+    if (lander.fuel < 20) uiFuelBar.style.backgroundColor = "#f33";
+    else uiFuelBar.style.backgroundColor = "#0f0";
+}
+
+// --- CONTROLS ---
+window.addEventListener('keydown', e => {
+    if (e.code === 'Space') {
+        // Initialize Audio Context on first interaction
+        initAudio();
+        if(audioCtx && audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+
+        if (gameState !== "PLAYING") {
+            gameState = "PLAYING";
+            lander.reset();
+            generateTerrain();
+            particles = [];
+            document.getElementById('startScreen').classList.add('hidden');
+            document.getElementById('winScreen').classList.add('hidden');
+            document.getElementById('crashScreen').classList.add('hidden');
+        }
+    }
+
+    if (gameState === "PLAYING") {
+        if (e.code === 'ArrowUp') lander.thrusting = true;
+        if (e.code === 'ArrowLeft') lander.rotatingLeft = true;
+        if (e.code === 'ArrowRight') lander.rotatingRight = true;
+    }
+});
+
+window.addEventListener('keyup', e => {
+    // ** FIX ** 
+    // We handle key releases regardless of game state so we don't get 
+    // "sticky keys" if the user releases the button after crashing/landing.
+    if (e.code === 'ArrowUp') lander.thrusting = false;
+    if (e.code === 'ArrowLeft') lander.rotatingLeft = false;
+    if (e.code === 'ArrowRight') lander.rotatingRight = false;
+});
+
+// --- INIT ---
+resize();
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
