@@ -127,7 +127,6 @@
     <div class="scanlines"></div>
     <div class="glow"></div>
 
-    <!-- Heads Up Display -->
     <div id="ui-layer">
         <div class="telemetry-row">
             <span class="label">ALTITUDE:</span>
@@ -141,8 +140,11 @@
             <span class="label">V. SPEED:</span>
             <span id="ui-vspeed" class="value">0000</span>
         </div>
+        <div class="telemetry-row">
+            <span class="label">STREAK:</span>
+            <span id="ui-streak" class="value" style="color: #d4af37">0</span>
+        </div>
         
-        <!-- Split Fuel System -->
         <div class="fuel-label">MAIN ENGINE PROPELLANT</div>
         <div class="fuel-box">
             <div id="main-fuel-bar" class="bar-fill"></div>
@@ -154,7 +156,6 @@
         </div>
     </div>
 
-    <!-- Game State Messages -->
     <div id="messages">
         <div id="startScreen">
             <h1 class="msg-intro">MOON LANDER GAME</h1>
@@ -213,6 +214,7 @@ let padX = 0;
 let stars = [];
 let particles = [];
 let groundYUnderLander = 0;
+let landingStreak = 0; // NEW: Track consecutive landings
 
 // --- ADVANCED AUDIO SYSTEM ---
 const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -703,6 +705,7 @@ function handleLanding(p1, p2) {
 
     if (isFlat && safeVSpeed && safeHSpeed && safeAngle && safeRotation) {
         gameState = "LANDED";
+        landingStreak++; // INCREMENT STREAK
         lander.y = groundYUnderLander - 16;
         lander.vy = 0;
         lander.vx = 0;
@@ -710,6 +713,7 @@ function handleLanding(p1, p2) {
         document.getElementById('winScreen').classList.remove('hidden');
     } else {
         gameState = "CRASHED";
+        landingStreak = 0; // RESET STREAK
         createExplosion(lander.x, lander.y);
         document.getElementById('crashScreen').classList.remove('hidden');
     }
@@ -757,6 +761,7 @@ function loop() {
 const uiAlt = document.getElementById('ui-alt');
 const uiHSpeed = document.getElementById('ui-hspeed');
 const uiVSpeed = document.getElementById('ui-vspeed');
+const uiStreak = document.getElementById('ui-streak');
 const uiMainBar = document.getElementById('main-fuel-bar');
 const uiRcsBar = document.getElementById('rcs-fuel-bar');
 
@@ -770,6 +775,9 @@ function updateUI() {
     uiHSpeed.className = "value " + (Math.abs(lander.vx) > MAX_LANDING_SPEED_H ? "warn" : "good");
     uiVSpeed.innerText = (-vSpeed).toString().padStart(3, '0');
     uiVSpeed.className = "value " + (Math.abs(lander.vy) > MAX_LANDING_SPEED_V ? "warn" : "good");
+
+    // Update Streak
+    uiStreak.innerText = landingStreak;
 
     // Update Split Fuel Bars
     uiMainBar.style.width = Math.max(0, lander.mainFuel) + "%";
